@@ -32,6 +32,24 @@ export const SCHEMA = {
   thruster: {
     power: p(30, { min: 5, max: 90, step: 1 }),
   },
+  blaster: {
+    fireRate: p(9, { min: 2, max: 20, step: 0.5 }),
+    speed: p(55, { min: 15, max: 120, step: 1 }),
+  },
+  vortex: {
+    radius: p(9, { min: 3, max: 20, step: 0.5 }),
+    pull: p(60, { min: 10, max: 200, step: 2 }),
+  },
+  zapper: {
+    power: p(14, { min: 2, max: 60, step: 0.5 }),
+  },
+  car: {
+    accel: p(30, { min: 5, max: 80, step: 1 }),
+    topSpeed: p(26, { min: 6, max: 60, step: 1 }),
+    turnRate: p(2.4, { min: 0.5, max: 6, step: 0.1 }),
+    grip: p(10, { min: 0, max: 30, step: 0.5 }),
+    boostMult: p(1.8, { min: 1, max: 3, step: 0.05 }),
+  },
   world: {
     timeScale: p(1.0, { min: 0.05, max: 1.5, step: 0.05 }),
     buoyancy: p(1.7, { min: 0, max: 4, step: 0.05 }),

@@ -7,8 +7,18 @@ import type { Params } from './params';
 import { Physgun } from './physgun';
 import { keys } from './player';
 import { sfx } from './sfx';
+import { Blaster, Vortex, Zapper, Flashes } from './gadgets';
 
-export type ToolId = 'physgun' | 'spawner' | 'hose' | 'boom' | 'rope' | 'thruster';
+export type ToolId =
+  | 'physgun'
+  | 'spawner'
+  | 'hose'
+  | 'boom'
+  | 'rope'
+  | 'thruster'
+  | 'blaster'
+  | 'vortex'
+  | 'zapper';
 
 export const TOOL_DEFS: { id: ToolId; name: string; color: string }[] = [
   { id: 'physgun', name: 'PHYSGUN', color: '#6fc3ff' },
@@ -17,6 +27,9 @@ export const TOOL_DEFS: { id: ToolId; name: string; color: string }[] = [
   { id: 'boom', name: 'BOOM', color: '#ff9a4d' },
   { id: 'rope', name: 'ROPE', color: '#ffe14d' },
   { id: 'thruster', name: 'THRUSTER', color: '#ff5f8a' },
+  { id: 'blaster', name: 'BLASTER', color: '#ff6b4d' },
+  { id: 'vortex', name: 'VORTEX', color: '#b06bff' },
+  { id: 'zapper', name: 'ZAPPER', color: '#6bffe8' },
 ];
 
 export const SPAWN_ITEMS = [
@@ -67,6 +80,10 @@ export class Tools {
   active: ToolId = 'physgun';
   spawnIndex = 0;
   readonly physgun: Physgun;
+  readonly blaster: Blaster;
+  readonly vortex: Vortex;
+  readonly zapper: Zapper;
+  readonly flashes: Flashes;
   shake = 0;
 
   onToolChanged: (id: ToolId) => void = () => {};
@@ -81,6 +98,8 @@ export class Tools {
   private wheelAccum = 0;
 
   private hoseOn = false;
+  private blasterHeld = false;
+  private zapOn = false;
   private boomCooldown = 0;
   private ropes: Rope[] = [];
   private ropePickA: { handle: number; local: THREE.Vector3 } | null = null;
@@ -151,6 +170,10 @@ export class Tools {
     scene.add(player.camera);
 
     this.physgun = new Physgun(world, props, player, scene, this.muzzle);
+    this.flashes = new Flashes(scene);
+    this.blaster = new Blaster(world, scene);
+    this.vortex = new Vortex(world, scene, props, this.flashes);
+    this.zapper = new Zapper(world, scene, props, this.flashes);
 
     // rope pick-A marker: shows which prop is waiting for its partner
     this.pickMarker = new THREE.Sprite(
@@ -188,6 +211,8 @@ export class Tools {
     if (id === this.active) return;
     if (this.active === 'physgun' && this.physgun.holding) this.physgun.drop();
     if (this.active === 'hose') this.stopHose();
+    this.stopZap();
+    this.blasterHeld = false;
     this.ropePickA = null;
     this.pickMarker.visible = false;
     this.active = id;
@@ -203,6 +228,34 @@ export class Tools {
       this.hoseOn = false;
       sfx.sprayStop();
     }
+  }
+
+  private stopZap() {
+    if (this.zapOn) {
+      this.zapOn = false;
+      sfx.zapStop();
+    }
+    this.zapper.stop();
+  }
+
+  /** Eye ray nudged forward so spawned projectiles clear the player capsule. */
+  private fireRay(): { origin: THREE.Vector3; dir: THREE.Vector3 } {
+    const dir = this.player.viewDir(new THREE.Vector3());
+    const origin = this.player.eye.addScaledVector(dir, 0.95);
+    return { origin, dir };
+  }
+
+  /** Park every held-input tool state (entering the car). */
+  suspend() {
+    this.physgun.forceRelease();
+    this.stopHose();
+    this.stopZap();
+    this.blasterHeld = false;
+    this.gun.visible = false;
+  }
+
+  resume() {
+    this.gun.visible = true;
   }
 
   private aim(): { point: THREE.Vector3; handle?: number; normal?: THREE.Vector3 } | null {
@@ -267,6 +320,20 @@ export class Tools {
         case 'thruster':
           this.placeThruster();
           break;
+        case 'blaster':
+          this.blasterHeld = true;
+          break;
+        case 'vortex': {
+          const ray = this.fireRay();
+          if (this.vortex.throwOrb(ray.origin, ray.dir)) this.kick = 0.6;
+          break;
+        }
+        case 'zapper':
+          if (!this.zapOn) {
+            this.zapOn = true;
+            sfx.zapStart();
+          }
+          break;
       }
       this.onAction();
     } else if (button === 2) {
@@ -289,6 +356,21 @@ export class Tools {
         case 'thruster':
           this.clearThrusters();
           break;
+        case 'blaster': {
+          const ray = this.fireRay();
+          if (this.blaster.fire(ray.origin, ray.dir, true, params)) this.kick = 0.9;
+          break;
+        }
+        case 'vortex': {
+          const aim = this.aim();
+          if (aim && this.vortex.collapseAt(aim.point)) this.kick = 0.8;
+          break;
+        }
+        case 'zapper': {
+          const aim = this.aim();
+          if (aim && this.zapper.chain(aim.point, params)) this.kick = 0.85;
+          break;
+        }
         case 'hose':
           break;
       }
@@ -298,6 +380,8 @@ export class Tools {
 
   onMouseUp(button: number, params: Params) {
     if (button === 0 && this.active === 'hose') this.stopHose();
+    if (button === 0 && this.active === 'blaster') this.blasterHeld = false;
+    if (button === 0 && this.active === 'zapper') this.stopZap();
     if (button === 0 && this.active === 'physgun') {
       const result = this.physgun.releaseCharge(params);
       if (result === 'launched') this.kick = 1;
@@ -598,6 +682,7 @@ export class Tools {
    * comes free and step count never double-applies).
    */
   prePhysics(step: number, params: Params) {
+    this.vortex.prePhysics(step, params);
     for (let i = this.thrusters.length - 1; i >= 0; i--) {
       const t = this.thrusters[i];
       const ref = this.bodyRef(t.handle);
@@ -646,6 +731,27 @@ export class Tools {
       this.fluid.emitJet(origin, dir, dt, params);
       this.kick = Math.max(this.kick, 0.14 + Math.random() * 0.05);
     }
+
+    // gadget weapons
+    if (this.blasterHeld && this.active === 'blaster') {
+      const ray = this.fireRay();
+      if (this.blaster.fire(ray.origin, ray.dir, false, params)) {
+        this.kick = Math.max(this.kick, 0.35);
+        this.onAction();
+      }
+    }
+    if (this.zapOn && this.active === 'zapper') {
+      const aim = this.aim();
+      if (aim) {
+        const origin = this.muzzle.getWorldPosition(this.tmpV);
+        this.zapper.beam(origin, aim.point, aim.handle, dt, params);
+        this.kick = Math.max(this.kick, 0.1 + Math.random() * 0.06);
+      }
+    }
+    this.blaster.update(rawDt);
+    this.vortex.update(rawDt);
+    this.zapper.update(rawDt);
+    this.flashes.update(rawDt);
 
     // ropes visuals
     this.pruneRopes();

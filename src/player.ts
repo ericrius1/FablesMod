@@ -24,6 +24,8 @@ export class Player {
   pitch = 0;
   grounded = false;
   inWater = false;
+  /** Extra AABBs the controller collides with (the car registers here). */
+  readonly extraSolids: { min: THREE.Vector3; max: THREE.Vector3 }[] = [];
 
   readonly camera: THREE.PerspectiveCamera;
   private kinHandle: number;
@@ -58,6 +60,11 @@ export class Player {
     return new THREE.Vector3(this.pos.x, this.pos.y + EYE, this.pos.z);
   }
 
+  /** Teleport the kinematic mirror capsule (used while driving to stash it away). */
+  parkBody(x: number, y: number, z: number) {
+    this.world.setBodyTransform(this.kinHandle, [x, y, z]);
+  }
+
   viewDir(target = new THREE.Vector3()): THREE.Vector3 {
     return target.set(
       -Math.sin(this.yaw) * Math.cos(this.pitch),
@@ -83,6 +90,7 @@ export class Player {
     skipHandle: number
   ): Generator<{ min: THREE.Vector3; max: THREE.Vector3; prop?: Prop }> {
     for (const s of this.statics) yield s;
+    for (const s of this.extraSolids) yield s;
     for (const prop of props.all.values()) {
       if (prop.handle === skipHandle) continue;
       yield { min: prop.aabb.min, max: prop.aabb.max, prop };

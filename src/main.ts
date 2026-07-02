@@ -7,6 +7,7 @@ import { Props } from './props';
 import { Player } from './player';
 import { Fluid } from './fluid';
 import { Tools, TOOL_DEFS, type ToolId } from './tools';
+import { Car } from './car';
 import { Hud } from './hud';
 import { initAudio, setVolume, sfx } from './sfx';
 
@@ -17,7 +18,12 @@ const TOOL_HINTS: Record<ToolId, string> = {
   boom: 'LMB boom · RMB mega boom',
   rope: 'LMB link two props · LMB a rope (or C) cuts it · RMB clear all',
   thruster: 'LMB strap a rocket to a prop · RMB clear thrusters',
+  blaster: 'hold LMB auto-fire · RMB heavy slug',
+  vortex: 'LMB lob a singularity · RMB collapse at aim',
+  zapper: 'hold LMB lightning — fry props to dust · RMB chain arc',
 };
+
+const DRIVE_HINT = 'W A S D drive · SHIFT boost · SPACE drift · R flip · E exit';
 
 async function boot() {
   const { params, pane, stats, onLandmarks } = createDebug();
@@ -31,6 +37,9 @@ async function boot() {
   const player = new Player(world, level.statics, level.waters, level.domes, innerWidth / innerHeight);
   const fluid = new Fluid(scene, world, props, level.statics, level.waters, level.domes);
   const tools = new Tools(world, props, player, fluid, scene);
+  const car = new Car(world, scene, level.statics, level.domes);
+  player.extraSolids.push(car.solid); // walkable collision against the buggy
+  tools.vortex.extraBodies = () => [car.extraBody]; // singularities tug the car too
   const hud = new Hud();
 
   // ── renderer ───────────────────────────────────────────────────────────────
@@ -57,20 +66,28 @@ async function boot() {
   // ── pointer lock + input ──────────────────────────────────────────────────
   const canvas = renderer.domElement;
   let locked = false;
+  let started = false;
   // pointer lock can be unavailable (embedded previews, permissions policy);
   // fall back to playing with a visible cursor — movementX/Y still works
   let lockFallback = false;
-  const requestLock = () => {
+  const requestLock = (allowFallback = true) => {
     initAudio();
+    lockFallback = false;
     const req = canvas.requestPointerLock() as Promise<void> | undefined;
     req?.catch(() => {
+      if (!allowFallback) return;
       lockFallback = true;
       locked = true;
+      started = true;
       hud.setLocked(true);
     });
   };
-  hud.bindPlay(requestLock);
+  hud.bindPlay(() => requestLock(true));
   document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement === canvas) {
+      started = true;
+      lockFallback = false;
+    }
     locked = document.pointerLockElement === canvas || lockFallback;
     hud.setLocked(locked);
     if (!locked) tools.onMouseUp(0, params);
@@ -79,7 +96,14 @@ async function boot() {
     if (locked) player.onMouseDelta(e.movementX, e.movementY);
   });
   addEventListener('mousedown', (e) => {
-    if (locked) tools.onMouseDown(e.button, params);
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (t?.closest('[class^="tp-"], [class*=" tp-"]')) return;
+    if (!locked && started) {
+      requestLock(false);
+      return;
+    }
+    if (locked && !car.driving) tools.onMouseDown(e.button, params);
   });
   addEventListener('mouseup', (e) => {
     if (locked) tools.onMouseUp(e.button, params);
@@ -88,7 +112,7 @@ async function boot() {
   addEventListener(
     'wheel',
     (e) => {
-      if (locked) tools.onWheel(e.deltaY);
+      if (locked && !car.driving) tools.onWheel(e.deltaY);
     },
     { passive: true }
   );
@@ -98,12 +122,33 @@ async function boot() {
   addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    const idx = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code);
-    if (idx >= 0) {
+    const idx = [
+      'Digit1',
+      'Digit2',
+      'Digit3',
+      'Digit4',
+      'Digit5',
+      'Digit6',
+      'Digit7',
+      'Digit8',
+      'Digit9',
+    ].indexOf(e.code);
+    if (idx >= 0 && !car.driving) {
       tools.setTool(TOOL_DEFS[idx].id);
       return;
     }
     switch (e.code) {
+      case 'KeyE':
+        if (car.driving) {
+          car.exit(player);
+          tools.resume();
+          hud.setActiveTool(tools.active, TOOL_HINTS[tools.active]);
+        } else if (locked && car.playerNear(player.pos)) {
+          car.enter(player);
+          tools.suspend();
+          hud.setHint(DRIVE_HINT);
+        }
+        break;
       case 'KeyG':
         zeroG = !zeroG;
         props.setZeroG(zeroG);
@@ -170,6 +215,23 @@ async function boot() {
     },
     ropes: () => tools.ropeCount,
     thrusters: () => tools.thrusterCount,
+    carState: () => ({
+      pos: car.pos.toArray().map((v) => Math.round(v * 100) / 100),
+      speed: Math.round(car.speed * 100) / 100,
+      driving: car.driving,
+      grounded: car.grounded,
+      boosting: car.boosting,
+    }),
+    enterCar: () => {
+      car.enter(player);
+      tools.suspend();
+      return true;
+    },
+    exitCar: () => {
+      car.exit(player);
+      tools.resume();
+      return true;
+    },
     grabAim: () => {
       const ok = tools.physgun.tryGrab();
       return { grabbed: ok, holding: tools.physgun.holding };
@@ -208,6 +270,7 @@ async function boot() {
   let last = performance.now();
   let accumulator = 0;
   let statusTick = 0;
+  let carPrompt = false;
 
   const frame = (now: number) => {
     const rawDt = Math.min((now - last) / 1000, 0.05);
@@ -219,7 +282,7 @@ async function boot() {
 
     // tools first (physgun servo velocities), then player (kinematic mirror)
     const heldHandle = tools.update(dt, rawDt, params);
-    player.update(rawDt, params, props, heldHandle, locked);
+    if (!car.driving) player.update(rawDt, params, props, heldHandle, locked);
 
     // shadow camera follows the player across the big map
     level.sun.position.set(player.pos.x + 34, player.pos.y + 46, player.pos.z + 22);
@@ -231,6 +294,7 @@ async function boot() {
     while (accumulator >= FIXED_STEP && steps < 4) {
       fluid.prePhysics(FIXED_STEP, params);
       tools.prePhysics(FIXED_STEP, params);
+      car.prePhysics(FIXED_STEP, params, locked);
       world.step(FIXED_STEP, SUBSTEPS);
       accumulator -= FIXED_STEP;
       steps++;
@@ -251,6 +315,7 @@ async function boot() {
     }
 
     props.sync();
+    car.update(dt, rawDt, player);
     fluid.update(dt, params);
 
     // camera shake after player positioned the camera
@@ -263,6 +328,7 @@ async function boot() {
 
     if (++statusTick % 20 === 0) {
       const flags = [
+        car.driving ? (car.boosting ? 'BOOST' : 'DRIVING') : '',
         zeroG ? 'ZERO-G' : '',
         slowMo ? 'SLOW-MO' : '',
         player.inWater ? 'SWIMMING' : '',
@@ -274,6 +340,15 @@ async function boot() {
       hud.setStatus(
         `${props.count} props · ${props.ragdolls.length} dolls · ${fluid.dropletCount} drops${flags ? '\n' + flags : ''}`
       );
+      // "hop in" prompt when standing near the buggy
+      if (!car.driving) {
+        const near = car.playerNear(player.pos);
+        if (near !== carPrompt) {
+          carPrompt = near;
+          if (near) hud.setHint('E — hop in the buggy');
+          else hud.setActiveTool(tools.active, TOOL_HINTS[tools.active]);
+        }
+      }
     }
 
     renderer.render(scene, player.camera);

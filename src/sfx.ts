@@ -6,6 +6,8 @@ let master: GainNode | null = null;
 let sprayNode: { gain: GainNode; stop: () => void } | null = null;
 let humNode: { gain: GainNode; oscA: OscillatorNode; oscB: OscillatorNode } | null = null;
 let thrustNode: { gain: GainNode; src: AudioBufferSourceNode; sub: OscillatorNode } | null = null;
+let zapNode: { gain: GainNode; stop: () => void } | null = null;
+let engineNode: { gain: GainNode; osc: OscillatorNode; sub: OscillatorNode } | null = null;
 let volume = 0.22;
 
 function ac(): AudioContext | null {
@@ -184,6 +186,105 @@ export const sfx = {
     humNode.oscA.stop(a.currentTime + 0.9);
     humNode.oscB.stop(a.currentTime + 0.9);
     humNode = null;
+  },
+  shoot() {
+    // snappy pew: fast square drop + hiss
+    playTone(950, 240, 0.2, 0.07, 'square');
+    playNoise(0.14, 0.06, 'highpass', 1800);
+  },
+  slug() {
+    playTone(220, 55, 0.5, 0.22, 'square');
+    playNoise(0.3, 0.16, 'lowpass', 900);
+  },
+  zapBurst() {
+    playNoise(0.5, 0.18, 'highpass', 2600, 0.4);
+    playTone(1400, 90, 0.28, 0.16, 'sawtooth');
+  },
+  disintegrate() {
+    // rising fizz as the prop pops into dust
+    playTone(500, 2200, 0.24, 0.22, 'sawtooth');
+    playNoise(0.32, 0.26, 'bandpass', 3000);
+  },
+  vortexThrow() {
+    playTone(500, 700, 0.18, 0.12, 'sine');
+  },
+  vortexSpawn() {
+    // deep descending implosion swell
+    playTone(600, 38, 0.42, 1.1, 'sine');
+    playNoise(0.2, 0.9, 'lowpass', 320);
+  },
+  zapStart() {
+    const a = ac();
+    if (!a || !master || zapNode) return;
+    const src = a.createBufferSource();
+    src.buffer = noiseBuffer(a, 1);
+    src.loop = true;
+    const filter = a.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 3400;
+    filter.Q.value = 0.7;
+    const buzz = a.createOscillator();
+    buzz.type = 'square';
+    buzz.frequency.value = 110;
+    const buzzGain = a.createGain();
+    buzzGain.gain.value = 0.16;
+    const g = a.createGain();
+    g.gain.setValueAtTime(0, a.currentTime);
+    g.gain.linearRampToValueAtTime(0.22, a.currentTime + 0.05);
+    src.connect(filter).connect(g);
+    buzz.connect(buzzGain).connect(g);
+    g.connect(master);
+    src.start();
+    buzz.start();
+    zapNode = {
+      gain: g,
+      stop: () => {
+        g.gain.setTargetAtTime(0, a.currentTime, 0.05);
+        src.stop(a.currentTime + 0.3);
+        buzz.stop(a.currentTime + 0.3);
+      },
+    };
+  },
+  zapStop() {
+    zapNode?.stop();
+    zapNode = null;
+  },
+  /** Engine rumble while driving; call every frame with on/off + speed. */
+  engineLoop(on: boolean, speed: number) {
+    const a = ac();
+    if (!a || !master) return;
+    if (on && !engineNode) {
+      const osc = a.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 46;
+      const filter = a.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 460;
+      const sub = a.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.value = 27;
+      const subGain = a.createGain();
+      subGain.gain.value = 0.7;
+      const g = a.createGain();
+      g.gain.value = 0;
+      osc.connect(filter).connect(g);
+      sub.connect(subGain).connect(g);
+      g.connect(master);
+      osc.start();
+      sub.start();
+      engineNode = { gain: g, osc, sub };
+    }
+    if (engineNode) {
+      engineNode.gain.gain.setTargetAtTime(on ? 0.12 : 0, a.currentTime, 0.12);
+      engineNode.osc.frequency.setTargetAtTime(44 + speed * 2.8, a.currentTime, 0.12);
+      engineNode.sub.frequency.setTargetAtTime(26 + speed * 1.3, a.currentTime, 0.12);
+      if (!on) {
+        const node = engineNode;
+        engineNode = null;
+        node.osc.stop(a.currentTime + 0.6);
+        node.sub.stop(a.currentTime + 0.6);
+      }
+    }
   },
   /** Shared rumble for all active thrusters; call every frame with the count. */
   thrustLoop(count: number) {

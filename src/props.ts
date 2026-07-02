@@ -416,6 +416,18 @@ export class Props {
     return this.ragdolls.find((r) => r.bones.some((b) => b.handle === handle));
   }
 
+  private static SCORCH_COLOR = new THREE.Color('#181512');
+
+  /** Darken a prop toward charcoal (zapper burn). amount 0..1 lerps per call. */
+  scorch(handle: number, amount: number) {
+    const prop = this.all.get(handle);
+    if (!prop) return;
+    prop.color.lerp(Props.SCORCH_COLOR, Math.min(1, amount));
+    const pool = this.pools[prop.shape];
+    pool.mesh.setColorAt(prop.slot, prop.color);
+    if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+  }
+
   clearAll() {
     for (const prop of [...this.all.values()]) this.despawn(prop);
     for (const rag of [...this.ragdolls]) this.despawnRagdoll(rag);
