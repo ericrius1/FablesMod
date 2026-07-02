@@ -8,6 +8,7 @@ import { Player } from './player';
 import { Fluid } from './fluid';
 import { Tools, TOOL_DEFS, type ToolId } from './tools';
 import { Car } from './car';
+import { Drone } from './drone';
 import { Hud } from './hud';
 import { initAudio, setVolume, sfx } from './sfx';
 
@@ -23,7 +24,8 @@ const TOOL_HINTS: Record<ToolId, string> = {
   zapper: 'hold LMB lightning — fry props to dust · RMB chain arc',
 };
 
-const DRIVE_HINT = 'W A S D drive · SHIFT boost · SPACE drift · R flip · E exit';
+const DRIVE_HINT = 'W A S D drive · SHIFT boost · SPACE drift · R flip · Q spawn · scroll item · E exit';
+const FLY_HINT = 'W A S D fly · SPACE rise · SHIFT sink · LMB rocket · RMB mega rocket · Q spawn · scroll item · E land';
 
 async function boot() {
   const { params, pane, stats, onLandmarks } = createDebug();
@@ -38,8 +40,9 @@ async function boot() {
   const fluid = new Fluid(scene, world, props, level.statics, level.waters, level.domes);
   const tools = new Tools(world, props, player, fluid, scene);
   const car = new Car(world, scene, level.statics, level.domes);
-  player.extraSolids.push(car.solid); // walkable collision against the buggy
-  tools.vortex.extraBodies = () => [car.extraBody]; // singularities tug the car too
+  const drone = new Drone(world, scene, level.statics, level.domes, level.waters, props, fluid);
+  player.extraSolids.push(car.solid, drone.solid); // walkable collision against the vehicles
+  tools.vortex.extraBodies = () => [car.extraBody, drone.extraBody]; // singularities tug them too
   const hud = new Hud();
 
   // ── renderer ───────────────────────────────────────────────────────────────
@@ -103,7 +106,13 @@ async function boot() {
       requestLock(false);
       return;
     }
-    if (locked && !car.driving) tools.onMouseDown(e.button, params);
+    if (!locked) return;
+    if (drone.piloting) {
+      if (e.button === 0) drone.fire(player.viewDir(), false, params);
+      else if (e.button === 2) drone.fire(player.viewDir(), true, params);
+    } else if (!car.driving) {
+      tools.onMouseDown(e.button, params);
+    }
   });
   addEventListener('mouseup', (e) => {
     if (locked) tools.onMouseUp(e.button, params);
@@ -112,7 +121,9 @@ async function boot() {
   addEventListener(
     'wheel',
     (e) => {
-      if (locked && !car.driving) tools.onWheel(e.deltaY);
+      if (!locked) return;
+      if (car.driving || drone.piloting) tools.cycleSpawnItem(e.deltaY);
+      else tools.onWheel(e.deltaY);
     },
     { passive: true }
   );
@@ -133,7 +144,7 @@ async function boot() {
       'Digit8',
       'Digit9',
     ].indexOf(e.code);
-    if (idx >= 0 && !car.driving) {
+    if (idx >= 0 && !car.driving && !drone.piloting) {
       tools.setTool(TOOL_DEFS[idx].id);
       return;
     }
@@ -143,10 +154,18 @@ async function boot() {
           car.exit(player);
           tools.resume();
           hud.setActiveTool(tools.active, TOOL_HINTS[tools.active]);
+        } else if (drone.piloting) {
+          drone.exit(player);
+          tools.resume();
+          hud.setActiveTool(tools.active, TOOL_HINTS[tools.active]);
         } else if (locked && car.playerNear(player.pos)) {
           car.enter(player);
           tools.suspend();
           hud.setHint(DRIVE_HINT);
+        } else if (locked && drone.playerNear(player.pos)) {
+          drone.enter(player);
+          tools.suspend();
+          hud.setHint(FLY_HINT);
         }
         break;
       case 'KeyG':
@@ -172,6 +191,10 @@ async function boot() {
         break;
       case 'KeyC':
         tools.cutRopeAction();
+        break;
+      case 'KeyQ':
+        // spawn from inside a vehicle (on foot the spawner tool handles it)
+        if (locked && (car.driving || drone.piloting)) tools.spawnAtAim();
         break;
     }
   });
@@ -232,6 +255,24 @@ async function boot() {
       tools.resume();
       return true;
     },
+    droneState: () => ({
+      pos: drone.pos.toArray().map((v) => Math.round(v * 100) / 100),
+      vel: drone.vel.toArray().map((v) => Math.round(v * 1000) / 1000),
+      quat: drone.quat.toArray().map((v) => Math.round(v * 1000) / 1000),
+      speed: Math.round(drone.speed * 100) / 100,
+      piloting: drone.piloting,
+    }),
+    enterDrone: () => {
+      drone.enter(player);
+      tools.suspend();
+      return true;
+    },
+    exitDrone: () => {
+      drone.exit(player);
+      tools.resume();
+      return true;
+    },
+    droneFire: (heavy = false) => drone.fire(player.viewDir(), heavy, params),
     grabAim: () => {
       const ok = tools.physgun.tryGrab();
       return { grabbed: ok, holding: tools.physgun.holding };
@@ -270,7 +311,7 @@ async function boot() {
   let last = performance.now();
   let accumulator = 0;
   let statusTick = 0;
-  let carPrompt = false;
+  let vehiclePrompt = '';
 
   const frame = (now: number) => {
     const rawDt = Math.min((now - last) / 1000, 0.05);
@@ -282,7 +323,7 @@ async function boot() {
 
     // tools first (physgun servo velocities), then player (kinematic mirror)
     const heldHandle = tools.update(dt, rawDt, params);
-    if (!car.driving) player.update(rawDt, params, props, heldHandle, locked);
+    if (!car.driving && !drone.piloting) player.update(rawDt, params, props, heldHandle, locked);
 
     // shadow camera follows the player across the big map
     level.sun.position.set(player.pos.x + 34, player.pos.y + 46, player.pos.z + 22);
@@ -295,6 +336,7 @@ async function boot() {
       fluid.prePhysics(FIXED_STEP, params);
       tools.prePhysics(FIXED_STEP, params);
       car.prePhysics(FIXED_STEP, params, locked);
+      drone.prePhysics(FIXED_STEP, params, locked);
       world.step(FIXED_STEP, SUBSTEPS);
       accumulator -= FIXED_STEP;
       steps++;
@@ -316,19 +358,22 @@ async function boot() {
 
     props.sync();
     car.update(dt, rawDt, player);
+    drone.update(dt, rawDt, player);
     fluid.update(dt, params);
 
     // camera shake after player positioned the camera
-    if (tools.shake > 0.001) {
-      const s = tools.shake * 0.05;
+    const shakeAmt = tools.shake + drone.shake;
+    if (shakeAmt > 0.001) {
+      const s = shakeAmt * 0.05;
       player.camera.position.x += (Math.random() - 0.5) * s;
       player.camera.position.y += (Math.random() - 0.5) * s;
-      player.camera.rotation.z += (Math.random() - 0.5) * tools.shake * 0.01;
+      player.camera.rotation.z += (Math.random() - 0.5) * shakeAmt * 0.01;
     }
 
     if (++statusTick % 20 === 0) {
       const flags = [
         car.driving ? (car.boosting ? 'BOOST' : 'DRIVING') : '',
+        drone.piloting ? 'PILOTING' : '',
         zeroG ? 'ZERO-G' : '',
         slowMo ? 'SLOW-MO' : '',
         player.inWater ? 'SWIMMING' : '',
@@ -340,12 +385,13 @@ async function boot() {
       hud.setStatus(
         `${props.count} props · ${props.ragdolls.length} dolls · ${fluid.dropletCount} drops${flags ? '\n' + flags : ''}`
       );
-      // "hop in" prompt when standing near the buggy
-      if (!car.driving) {
-        const near = car.playerNear(player.pos);
-        if (near !== carPrompt) {
-          carPrompt = near;
-          if (near) hud.setHint('E — hop in the buggy');
+      // "hop in" prompt when standing near a vehicle
+      if (!car.driving && !drone.piloting) {
+        const near = car.playerNear(player.pos) ? 'car' : drone.playerNear(player.pos) ? 'drone' : '';
+        if (near !== vehiclePrompt) {
+          vehiclePrompt = near;
+          if (near === 'car') hud.setHint('E — hop in the buggy');
+          else if (near === 'drone') hud.setHint('E — pilot the drone');
           else hud.setActiveTool(tools.active, TOOL_HINTS[tools.active]);
         }
       }

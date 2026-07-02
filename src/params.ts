@@ -50,6 +50,13 @@ export const SCHEMA = {
     grip: p(10, { min: 0, max: 30, step: 0.5 }),
     boostMult: p(1.8, { min: 1, max: 3, step: 0.05 }),
   },
+  drone: {
+    speed: p(18, { min: 4, max: 44, step: 1 }),
+    agility: p(5, { min: 1, max: 14, step: 0.5 }),
+    rocketSpeed: p(42, { min: 10, max: 100, step: 1 }),
+    boomRadius: p(5.5, { min: 1, max: 14, step: 0.25 }),
+    boomImpulse: p(42, { min: 4, max: 160, step: 1 }),
+  },
   world: {
     timeScale: p(1.0, { min: 0.05, max: 1.5, step: 0.05 }),
     buoyancy: p(1.7, { min: 0, max: 4, step: 0.05 }),

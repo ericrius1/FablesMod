@@ -394,20 +394,24 @@ export class Tools {
       this.physgun.adjustDistance(-Math.sign(deltaY) * Math.min(1.4, Math.abs(deltaY) / 90));
       return;
     }
-    if (this.active === 'spawner') {
-      // one item per full wheel notch — trackpad micro-deltas accumulate
-      this.wheelAccum += deltaY;
-      if (Math.abs(this.wheelAccum) >= 120) {
-        const dir = this.wheelAccum > 0 ? -1 : 1;
-        this.wheelAccum = 0;
-        this.spawnIndex = (this.spawnIndex + dir + SPAWN_ITEMS.length) % SPAWN_ITEMS.length;
-        this.onSpawnItemChanged(this.spawnItem);
-        sfx.tick();
-      }
+    if (this.active === 'spawner') this.cycleSpawnItem(deltaY);
+  }
+
+  /** Scroll through spawn items (spawner tool, or from inside a vehicle). */
+  cycleSpawnItem(deltaY: number) {
+    // one item per full wheel notch — trackpad micro-deltas accumulate
+    this.wheelAccum += deltaY;
+    if (Math.abs(this.wheelAccum) >= 120) {
+      const dir = this.wheelAccum > 0 ? -1 : 1;
+      this.wheelAccum = 0;
+      this.spawnIndex = (this.spawnIndex + dir + SPAWN_ITEMS.length) % SPAWN_ITEMS.length;
+      this.onSpawnItemChanged(this.spawnItem);
+      sfx.tick();
     }
   }
 
-  private spawnAtAim() {
+  /** Drop the current spawn item at the aim point (spawner LMB, or Q from a vehicle). */
+  spawnAtAim() {
     const aim = this.aim();
     if (!aim) return;
     const p = aim.point;

@@ -8,6 +8,7 @@ let humNode: { gain: GainNode; oscA: OscillatorNode; oscB: OscillatorNode } | nu
 let thrustNode: { gain: GainNode; src: AudioBufferSourceNode; sub: OscillatorNode } | null = null;
 let zapNode: { gain: GainNode; stop: () => void } | null = null;
 let engineNode: { gain: GainNode; osc: OscillatorNode; sub: OscillatorNode } | null = null;
+let droneNode: { gain: GainNode; osc: OscillatorNode; sub: OscillatorNode } | null = null;
 let volume = 0.22;
 
 function ac(): AudioContext | null {
@@ -281,6 +282,43 @@ export const sfx = {
       if (!on) {
         const node = engineNode;
         engineNode = null;
+        node.osc.stop(a.currentTime + 0.6);
+        node.sub.stop(a.currentTime + 0.6);
+      }
+    }
+  },
+  /** Rotor whine while piloting the drone; call every frame with on/off + speed. */
+  droneLoop(on: boolean, speed: number) {
+    const a = ac();
+    if (!a || !master) return;
+    if (on && !droneNode) {
+      const osc = a.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 130;
+      const filter = a.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1100;
+      const sub = a.createOscillator();
+      sub.type = 'triangle';
+      sub.frequency.value = 65;
+      const subGain = a.createGain();
+      subGain.gain.value = 0.6;
+      const g = a.createGain();
+      g.gain.value = 0;
+      osc.connect(filter).connect(g);
+      sub.connect(subGain).connect(g);
+      g.connect(master);
+      osc.start();
+      sub.start();
+      droneNode = { gain: g, osc, sub };
+    }
+    if (droneNode) {
+      droneNode.gain.gain.setTargetAtTime(on ? 0.07 : 0, a.currentTime, 0.12);
+      droneNode.osc.frequency.setTargetAtTime(126 + speed * 4, a.currentTime, 0.1);
+      droneNode.sub.frequency.setTargetAtTime(63 + speed * 2, a.currentTime, 0.1);
+      if (!on) {
+        const node = droneNode;
+        droneNode = null;
         node.osc.stop(a.currentTime + 0.6);
         node.sub.stop(a.currentTime + 0.6);
       }
