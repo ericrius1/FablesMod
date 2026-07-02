@@ -168,13 +168,6 @@ export function buildWorld(world: PhysicsWorld): World {
   const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.9, metalness: 0.05 });
   const wallMat = new THREE.MeshStandardMaterial({ color: '#6d7683', roughness: 0.85, metalness: 0.1 });
   const stoneMat = new THREE.MeshStandardMaterial({ color: '#39414d', roughness: 0.95 });
-  const accentMat = new THREE.MeshStandardMaterial({
-    color: '#586b7e',
-    roughness: 0.6,
-    metalness: 0.15,
-    emissive: '#12395c',
-    emissiveIntensity: 0.9,
-  });
 
   function staticBox(
     cx: number,
@@ -264,23 +257,7 @@ export function buildWorld(world: PhysicsWorld): World {
   for (let i = 0; i < 4; i++) {
     staticBox(px, (0.5 * (i + 1)) / 2, pz - 4.5 + i * 1.5, 2.6, 0.25 * (i + 1), 0.75, wallMat);
   }
-  staticBox(px, 1.1, pz + 4.2, 3.2, 1.1, 3.2, accentMat); // platform, top y=2.2
-
-  // ── pillars scattered across the map ─────────────────────────────────────
-  const pillarSpots: [number, number][] = [
-    [8, 12],
-    [-6, -16],
-    [30, 8],
-    [-30, -8],
-    [52, -20],
-    [-45, 55],
-    [20, 48],
-    [-70, 10],
-    [70, -55],
-  ];
-  for (const [x, z] of pillarSpots) {
-    staticBox(x, 1.6, z, 0.7, 1.6, 0.7, accentMat);
-  }
+  staticBox(px, 1.1, pz + 4.2, 3.2, 1.1, 3.2, wallMat); // platform, top y=2.2
 
   return { scene, statics, waters: PONDS, domes: DOMES, sun, sunTarget };
 }

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { BodyType, type PhysicsWorld } from './physics';
 import { domeHeightAt, type Dome, type StaticBox, type WaterRegion } from './world';
 import type { Params } from './params';
-import type { Props } from './props';
+import type { Prop, Props } from './props';
 
 // First-person controller: AABB capsule vs level + prop AABBs with step-up,
 // mirrored into a kinematic physics capsule so walking into props shoves them.
@@ -78,12 +78,36 @@ export class Player {
     );
   }
 
-  private *solids(props: Props, skipHandle: number): Generator<{ min: THREE.Vector3; max: THREE.Vector3 }> {
+  private *solids(
+    props: Props,
+    skipHandle: number
+  ): Generator<{ min: THREE.Vector3; max: THREE.Vector3; prop?: Prop }> {
     for (const s of this.statics) yield s;
     for (const prop of props.all.values()) {
       if (prop.handle === skipHandle) continue;
-      yield { min: prop.aabb.min, max: prop.aabb.max };
+      yield { min: prop.aabb.min, max: prop.aabb.max, prop };
     }
+  }
+
+  private kickTimes = new Map<number, number>();
+
+  /** Shoulder-check: shove a prop along our motion, harder the faster we run. */
+  private shoveProp(prop: Prop, speed: number, shove: number) {
+    const now = performance.now();
+    const lastKick = this.kickTimes.get(prop.handle) ?? 0;
+    if (now - lastKick < 130) return;
+    this.kickTimes.set(prop.handle, now);
+    if (this.kickTimes.size > 256) this.kickTimes.clear();
+
+    const inv = 1 / Math.max(0.001, Math.hypot(this.vel.x, this.vel.z));
+    const dx = this.vel.x * inv;
+    const dz = this.vel.z * inv;
+    const punch = speed * shove * prop.mass;
+    this.world.applyImpulse(prop.handle, [dx * punch, punch * 0.35, dz * punch]);
+    this.world.setBodyAwake(prop.handle, true);
+    // hitting things costs momentum
+    this.vel.x *= 0.82;
+    this.vel.z *= 0.82;
   }
 
   private freeAt(y: number, props: Props, skipHandle: number): boolean {
@@ -186,6 +210,11 @@ export class Player {
           this.pos.y = stepTo;
           this.grounded = true;
           continue;
+        }
+        // running into a prop shoves it — harder the faster you're moving
+        if (s.prop) {
+          const speed = Math.hypot(this.vel.x, this.vel.z);
+          if (speed > 2.5) this.shoveProp(s.prop, speed, params.player.shove);
         }
         if (this.vel[axis] > 0) this.pos[axis] = s.min[axis] - HALF_W;
         else if (this.vel[axis] < 0) this.pos[axis] = s.max[axis] + HALF_W;

@@ -87,8 +87,8 @@ const SHAPE_DEFS: Record<
   },
 };
 
-const CAPS: Record<PropShape, number> = { crate: 220, ball: 260, plank: 160, barrel: 120 };
-const MAX_RAGDOLLS = 8;
+// Initial instanced-mesh capacity per shape; pools grow (double) when full.
+const INITIAL_CAPS: Record<PropShape, number> = { crate: 256, ball: 256, plank: 192, barrel: 128 };
 
 function crateTexture() {
   const c = document.createElement('canvas');
@@ -158,16 +158,44 @@ export class Props {
 
     this.pools = Object.fromEntries(
       (Object.keys(SHAPE_DEFS) as PropShape[]).map((shape) => {
-        const mesh = new THREE.InstancedMesh(geos[shape], mats[shape], CAPS[shape]);
-        mesh.count = 0;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        mesh.userData.propShape = shape;
+        const mesh = this.makePoolMesh(shape, geos[shape], mats[shape], INITIAL_CAPS[shape]);
         scene.add(mesh);
-        return [shape, { shape, mesh, props: [], cap: CAPS[shape] }];
+        return [shape, { shape, mesh, props: [], cap: INITIAL_CAPS[shape] }];
       })
     ) as unknown as Record<PropShape, Pool>;
+  }
+
+  private makePoolMesh(shape: PropShape, geo: THREE.BufferGeometry, mat: THREE.Material, cap: number) {
+    const mesh = new THREE.InstancedMesh(geo, mat, cap);
+    mesh.count = 0;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.userData.propShape = shape;
+    // instances spawn/move anywhere on the map: a lazily-computed bounding
+    // sphere goes stale and silently culls raycasts (physgun/rope misses)
+    mesh.frustumCulled = false;
+    mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 400);
+    return mesh;
+  }
+
+  /** Swap in a double-capacity InstancedMesh, re-writing every live instance. */
+  private growPool(pool: Pool) {
+    const old = pool.mesh;
+    pool.cap *= 2;
+    const mesh = this.makePoolMesh(pool.shape, old.geometry, old.material as THREE.Material, pool.cap);
+    mesh.count = pool.props.length;
+    for (const prop of pool.props) {
+      this.tmpMat.compose(prop.pos, prop.quat, this.tmpScale);
+      mesh.setMatrixAt(prop.slot, this.tmpMat);
+      mesh.setColorAt(prop.slot, prop.color);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.scene.remove(old);
+    old.dispose();
+    this.scene.add(mesh);
+    pool.mesh = mesh;
   }
 
   get count() {
@@ -205,7 +233,7 @@ export class Props {
     opts: { velocity?: THREE.Vector3; rotation?: THREE.Quaternion; colorIndex?: number } = {}
   ): Prop | undefined {
     const pool = this.pools[shape];
-    if (pool.props.length >= pool.cap) return undefined;
+    if (pool.props.length >= pool.cap) this.growPool(pool);
     const def = SHAPE_DEFS[shape];
 
     let handle: number;
@@ -306,7 +334,6 @@ export class Props {
   }
 
   spawnRagdoll(position: THREE.Vector3, velocity?: THREE.Vector3): Ragdoll | undefined {
-    if (this.ragdolls.length >= MAX_RAGDOLLS) return undefined;
     const rag = this.world.spawnHuman([position.x, position.y, position.z], {
       frictionTorque: 4,
       hertz: 2,
@@ -529,6 +556,90 @@ export class Props {
     }
   }
 
+  /** Jenga-style log tower: 3 planks per layer, alternating orientation. */
+  spawnJenga(center: THREE.Vector3, layers = 12) {
+    const t = SHAPE_DEFS.plank.half[1]; // half thickness
+    const w = SHAPE_DEFS.plank.half[2] * 2; // plank width
+    const layerH = t * 2 + 0.01;
+    const turned = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+    for (let y = 0; y < layers; y++) {
+      const cy = t + 0.01 + y * layerH;
+      for (let i = -1; i <= 1; i++) {
+        const off = i * (w + 0.02);
+        const pos =
+          y % 2
+            ? new THREE.Vector3(center.x + off, cy, center.z)
+            : new THREE.Vector3(center.x, cy, center.z + off);
+        this.spawn('plank', pos, { rotation: y % 2 ? turned.clone() : undefined });
+      }
+    }
+  }
+
+  /** Stepped crate pyramid. */
+  spawnPyramid(center: THREE.Vector3, base = 4) {
+    const h = SHAPE_DEFS.crate.half[0];
+    const size = h * 2 + 0.02;
+    for (let y = 0; y < base; y++) {
+      const n = base - y;
+      for (let x = 0; x < n; x++) {
+        for (let z = 0; z < n; z++) {
+          this.spawn(
+            'crate',
+            new THREE.Vector3(
+              center.x + (x - (n - 1) / 2) * size,
+              h + 0.01 + y * size,
+              center.z + (z - (n - 1) / 2) * size
+            )
+          );
+        }
+      }
+    }
+  }
+
+  /** Crate-henge: ring of gates, each two crate columns capped by a plank lintel. */
+  spawnHenge(center: THREE.Vector3, radius = 5.5, gates = 5) {
+    const h = SHAPE_DEFS.crate.half[0];
+    const size = h * 2 + 0.02;
+    const t = SHAPE_DEFS.plank.half[1];
+    for (let g = 0; g < gates; g++) {
+      const a = (g / gates) * Math.PI * 2;
+      const gx = center.x + Math.cos(a) * radius;
+      const gz = center.z + Math.sin(a) * radius;
+      const tan = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a));
+      // whole gate shares one yaw so lintels rest flush on the column tops
+      const gateRot = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        Math.atan2(-tan.z, tan.x)
+      );
+      for (const side of [-0.7, 0.7]) {
+        for (let y = 0; y < 2; y++) {
+          this.spawn(
+            'crate',
+            new THREE.Vector3(gx + tan.x * side, h + 0.01 + y * size, gz + tan.z * side),
+            { rotation: gateRot.clone() }
+          );
+        }
+      }
+      this.spawn('plank', new THREE.Vector3(gx, 2 * size + t + 0.015, gz), { rotation: gateRot.clone() });
+    }
+  }
+
+  /** Little figure: crate torso, plank arms, crate chest, ball head, barrel feet. */
+  spawnSentinel(center: THREE.Vector3) {
+    const h = SHAPE_DEFS.crate.half[0];
+    const size = h * 2 + 0.02;
+    const t = SHAPE_DEFS.plank.half[1];
+    this.spawn('crate', new THREE.Vector3(center.x, h + 0.01, center.z));
+    this.spawn('crate', new THREE.Vector3(center.x, h + 0.01 + size, center.z));
+    const armY = 2 * size + t + 0.02; // plank resting on second crate
+    this.spawn('plank', new THREE.Vector3(center.x, armY, center.z));
+    const chestY = armY + t + h + 0.02;
+    this.spawn('crate', new THREE.Vector3(center.x, chestY, center.z));
+    this.spawn('ball', new THREE.Vector3(center.x, chestY + h + 0.39, center.z));
+    this.spawn('barrel', new THREE.Vector3(center.x - 0.85, 0.73, center.z));
+    this.spawn('barrel', new THREE.Vector3(center.x + 0.85, 0.73, center.z));
+  }
+
   spawnBallPit(center: THREE.Vector3, count = 36) {
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * Math.PI * 2;
@@ -556,6 +667,12 @@ export class Props {
     for (let i = 0; i < 8; i++) {
       this.spawn('ball', new THREE.Vector3(-6 + i * 1.7, 7.5 + Math.random(), 54 + (i % 3) * 2.5));
     }
+    // sculptures — every piece is a live prop: grab it, rope it, rocket it, blow it up
+    this.spawnJenga(new THREE.Vector3(30, 0, 8), 12);
+    this.spawnPyramid(new THREE.Vector3(-30, 0, -8), 4);
+    this.spawnHenge(new THREE.Vector3(-45, 0, 55), 5.5, 5);
+    this.spawnSentinel(new THREE.Vector3(8, 0, 12));
+    this.spawnSentinel(new THREE.Vector3(-6, 0, -16));
     this.spawnRagdoll(new THREE.Vector3(4, 1.4, 8));
     this.spawnRagdoll(new THREE.Vector3(0, 8.2, 58)); // hilltop sledder
   }

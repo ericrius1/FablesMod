@@ -9,6 +9,20 @@ import { sfx } from './sfx';
 
 const BEAM_POINTS = 24;
 
+// charge glow gradient: ice blue → aqua → violet → hot magenta (holds at max)
+const CHARGE_STOPS = [
+  new THREE.Color('#9fdcff'),
+  new THREE.Color('#5ef2d6'),
+  new THREE.Color('#7d6bff'),
+  new THREE.Color('#ff5ef0'),
+];
+
+function chargeColor(t: number, out: THREE.Color) {
+  const scaled = Math.min(1, Math.max(0, t)) * (CHARGE_STOPS.length - 1);
+  const seg = Math.min(CHARGE_STOPS.length - 2, Math.floor(scaled));
+  return out.copy(CHARGE_STOPS[seg]).lerp(CHARGE_STOPS[seg + 1], scaled - seg);
+}
+
 function glowTexture() {
   const c = document.createElement('canvas');
   c.width = c.height = 64;
@@ -25,6 +39,12 @@ function glowTexture() {
 export class Physgun {
   held: { handle: number; kind: 'prop' | 'bone'; prop?: Prop; bone?: Bone } | null = null;
   holdDist = 4;
+  charging = false;
+
+  private chargeT = 0;
+  private pullingIn = false;
+  private static readonly PULL_DIST = 3; // how close the auto pull-in settles
+  private static readonly TAP_TIME = 0.22; // release faster than this = plain drop
 
   private world: PhysicsWorld;
   private props: Props;
@@ -39,6 +59,7 @@ export class Physgun {
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
   private tmpV3 = new THREE.Vector3();
+  private tmpColor = new THREE.Color();
 
   constructor(world: PhysicsWorld, props: Props, player: Player, scene: THREE.Scene, muzzle: THREE.Object3D) {
     this.world = world;
@@ -102,6 +123,7 @@ export class Physgun {
       if (!prop && !bone) continue;
       this.held = prop ? { handle, kind: 'prop', prop } : { handle, kind: 'bone', bone };
       this.holdDist = Math.max(2.2, Math.min(12, hit.distance));
+      this.pullingIn = true; // reel the object in close after grab
       this.world.setBodyGravityScale(handle, 0);
       this.world.setBodyAwake(handle, true);
       this.velHistory.length = 0;
@@ -116,7 +138,9 @@ export class Physgun {
   }
 
   adjustDistance(delta: number) {
-    if (this.held) this.holdDist = Math.max(1.8, Math.min(14, this.holdDist + delta));
+    if (!this.held) return;
+    this.pullingIn = false; // manual scroll overrides the auto pull-in
+    this.holdDist = Math.max(1.8, Math.min(14, this.holdDist + delta));
   }
 
   drop() {
@@ -127,10 +151,38 @@ export class Physgun {
     sfx.release();
   }
 
-  launch(params: Params) {
+  startCharge() {
+    if (!this.held) return;
+    this.charging = true;
+    this.chargeT = 0;
+  }
+
+  /** 0..1 fraction of full charge, for HUD/visuals. */
+  get charge() {
+    return this.charging ? Math.min(1, this.chargeT / Math.max(0.05, this.lastChargeTime)) : 0;
+  }
+  private lastChargeTime = 1.2;
+
+  /** LMB released while holding: tap = drop, held = charged launch. */
+  releaseCharge(params: Params): 'dropped' | 'launched' | null {
+    if (!this.charging) return null;
+    this.charging = false;
+    if (!this.held) return null;
+    if (this.chargeT < Physgun.TAP_TIME) {
+      this.drop();
+      return 'dropped';
+    }
+    const t = Math.min(1, this.chargeT / Math.max(0.05, params.physgun.chargeTime));
+    const min = params.physgun.throwSpeed * 0.5;
+    const power = (min + (params.physgun.launchMax - min) * t) / params.physgun.throwSpeed;
+    this.launch(params, power);
+    return 'launched';
+  }
+
+  launch(params: Params, power = 1) {
     if (!this.held) return;
     const dir = this.player.viewDir(this.tmpV);
-    const speed = params.physgun.throwSpeed;
+    const speed = params.physgun.throwSpeed * power;
     const handle = this.held.handle;
     this.world.setBodyGravityScale(handle, this.props.zeroG ? 0 : 1);
     if (this.held.kind === 'bone') {
@@ -149,6 +201,9 @@ export class Physgun {
 
   private endHold() {
     this.held = null;
+    this.charging = false;
+    this.chargeT = 0;
+    this.pullingIn = false;
     this.beam.visible = false;
     this.glow.visible = false;
     this.holdLight.intensity = 0;
@@ -167,6 +222,14 @@ export class Physgun {
     if (!pos) {
       this.endHold();
       return 0;
+    }
+
+    if (this.pullingIn) {
+      this.holdDist += (Physgun.PULL_DIST - this.holdDist) * Math.min(1, dt * 6);
+      if (Math.abs(this.holdDist - Physgun.PULL_DIST) < 0.05) {
+        this.holdDist = Physgun.PULL_DIST;
+        this.pullingIn = false;
+      }
     }
 
     const eye = this.player.eye;
@@ -189,7 +252,11 @@ export class Physgun {
     }
     this.world.setBodyVelocity(this.held.handle, [vel.x, vel.y, vel.z], angular);
     this.world.setBodyAwake(this.held.handle, true);
-    sfx.humPitch(vel.length());
+
+    if (this.charging) this.chargeT += dt;
+    this.lastChargeTime = params.physgun.chargeTime;
+    const charge = this.charge;
+    sfx.humPitch(vel.length() + charge * 30);
 
     // velocity history for release inheritance (kept small on purpose)
     if (this.velHistory.length > 5) this.velHistory.shift();
@@ -211,10 +278,14 @@ export class Physgun {
     }
     attr.needsUpdate = true;
     this.glow.position.copy(pos);
-    this.glow.scale.setScalar(1.3 + Math.sin(performance.now() * 0.012) * 0.25);
+    this.glow.scale.setScalar(1.3 + charge * 1.6);
+    const col = chargeColor(charge, this.tmpColor);
+    (this.glow.material as THREE.SpriteMaterial).color.copy(col);
+    (this.beam.material as THREE.LineBasicMaterial).color.copy(col);
+    this.holdLight.color.copy(col);
     this.holdLight.position.copy(pos);
+    this.holdLight.intensity = 14 + charge * 40;
 
-    void dt;
     return this.held.handle;
   }
 }

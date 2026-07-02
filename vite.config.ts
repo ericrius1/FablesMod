@@ -5,6 +5,6 @@ export default defineConfig({
     exclude: ["box3d-wasm"]
   },
   server: {
-    port: 5183
+    port: Number(process.env.PORT) || 5183
   }
 });

@@ -8,7 +8,7 @@ import { Physgun } from './physgun';
 import { keys } from './player';
 import { sfx } from './sfx';
 
-export type ToolId = 'physgun' | 'spawner' | 'hose' | 'boom' | 'rope';
+export type ToolId = 'physgun' | 'spawner' | 'hose' | 'boom' | 'rope' | 'thruster';
 
 export const TOOL_DEFS: { id: ToolId; name: string; color: string }[] = [
   { id: 'physgun', name: 'PHYSGUN', color: '#6fc3ff' },
@@ -16,6 +16,7 @@ export const TOOL_DEFS: { id: ToolId; name: string; color: string }[] = [
   { id: 'hose', name: 'HOSE', color: '#4dd7ff' },
   { id: 'boom', name: 'BOOM', color: '#ff9a4d' },
   { id: 'rope', name: 'ROPE', color: '#ffe14d' },
+  { id: 'thruster', name: 'THRUSTER', color: '#ff5f8a' },
 ];
 
 export const SPAWN_ITEMS = [
@@ -40,7 +41,27 @@ type Rope = {
   line: THREE.Line;
 };
 
+type Thruster = {
+  handle: number;
+  local: THREE.Vector3; // attach point in body space
+  localDir: THREE.Vector3; // thrust direction in body space (points away from the clicked face)
+  mesh: THREE.Mesh;
+  flame: THREE.Sprite;
+};
+
 type Boom = { mesh: THREE.Mesh; light: THREE.PointLight; t: number };
+
+function glowSpriteTexture(inner: string, outer: string) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, inner);
+  grad.addColorStop(1, outer);
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
 
 export class Tools {
   active: ToolId = 'physgun';
@@ -63,7 +84,11 @@ export class Tools {
   private boomCooldown = 0;
   private ropes: Rope[] = [];
   private ropePickA: { handle: number; local: THREE.Vector3 } | null = null;
+  private pickMarker!: THREE.Sprite;
   private booms: Boom[] = [];
+  private thrusters: Thruster[] = [];
+  private flameTex!: THREE.CanvasTexture;
+  private thrusterMat!: THREE.MeshStandardMaterial;
 
   // viewmodel
   private gun = new THREE.Group();
@@ -78,6 +103,7 @@ export class Tools {
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
   private tmpQ = new THREE.Quaternion();
+  private upAxis = new THREE.Vector3(0, 1, 0);
 
   constructor(world: PhysicsWorld, props: Props, player: Player, fluid: Fluid, scene: THREE.Scene) {
     this.world = world;
@@ -125,6 +151,29 @@ export class Tools {
     scene.add(player.camera);
 
     this.physgun = new Physgun(world, props, player, scene, this.muzzle);
+
+    // rope pick-A marker: shows which prop is waiting for its partner
+    this.pickMarker = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: glowSpriteTexture('rgba(255,235,140,1)', 'rgba(255,190,40,0)'),
+        color: '#ffe14d',
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    this.pickMarker.scale.setScalar(0.55);
+    this.pickMarker.visible = false;
+    scene.add(this.pickMarker);
+
+    this.flameTex = glowSpriteTexture('rgba(255,240,200,1)', 'rgba(255,110,40,0)');
+    this.thrusterMat = new THREE.MeshStandardMaterial({
+      color: '#4a3f47',
+      roughness: 0.45,
+      metalness: 0.4,
+      emissive: '#ff5f8a',
+      emissiveIntensity: 0.7,
+    });
   }
 
   get spawnItem(): SpawnItem {
@@ -140,6 +189,7 @@ export class Tools {
     if (this.active === 'physgun' && this.physgun.holding) this.physgun.drop();
     if (this.active === 'hose') this.stopHose();
     this.ropePickA = null;
+    this.pickMarker.visible = false;
     this.active = id;
     const def = TOOL_DEFS.find((t) => t.id === id)!;
     this.coreMat.emissive.set(def.color);
@@ -155,14 +205,26 @@ export class Tools {
     }
   }
 
-  private aim(): { point: THREE.Vector3; handle?: number } | null {
+  private aim(): { point: THREE.Vector3; handle?: number; normal?: THREE.Vector3 } | null {
     const eye = this.player.eye;
     const dir = this.player.viewDir(this.tmpV);
     this.raycaster.set(eye, dir);
     const hits = this.raycaster.intersectObjects(this.props.raycastTargets(), true);
     for (const hit of hits) {
       const handle = this.props.handleFromHit(hit);
-      if (handle !== undefined) return { point: hit.point.clone(), handle };
+      if (handle === undefined) continue;
+      let normal: THREE.Vector3 | undefined;
+      if (hit.face) {
+        normal = hit.face.normal.clone();
+        if (hit.object instanceof THREE.InstancedMesh) {
+          const prop = this.props.all.get(handle);
+          if (prop) normal.applyQuaternion(prop.quat);
+        } else {
+          normal.applyQuaternion(hit.object.getWorldQuaternion(this.tmpQ));
+        }
+        normal.normalize();
+      }
+      return { point: hit.point.clone(), handle, normal };
     }
     const p = new THREE.Vector3();
     if (this.raycaster.ray.intersectPlane(this.groundPlane, p) && p.distanceTo(eye) < 70) {
@@ -172,11 +234,20 @@ export class Tools {
     return { point: eye.clone().addScaledVector(dir, 12) };
   }
 
+  /** Live pos/quat/mass for any grabbable body (prop or ragdoll bone). */
+  private bodyRef(handle: number): { pos: THREE.Vector3; quat: THREE.Quaternion; mass: number } | null {
+    const prop = this.props.all.get(handle);
+    if (prop) return { pos: prop.pos, quat: prop.quat, mass: prop.mass };
+    const bone = this.props.boneByHandle.get(handle);
+    if (bone) return { pos: bone.pos, quat: bone.group.quaternion, mass: bone.mass };
+    return null;
+  }
+
   onMouseDown(button: number, params: Params) {
     if (button === 0) {
       switch (this.active) {
         case 'physgun':
-          if (this.physgun.holding) this.physgun.drop();
+          if (this.physgun.holding) this.physgun.startCharge();
           else if (!this.physgun.tryGrab()) this.kick = 0.3;
           else this.kick = 0.55;
           break;
@@ -192,6 +263,9 @@ export class Tools {
           break;
         case 'rope':
           this.ropeClick();
+          break;
+        case 'thruster':
+          this.placeThruster();
           break;
       }
       this.onAction();
@@ -212,6 +286,9 @@ export class Tools {
         case 'rope':
           this.clearRopes();
           break;
+        case 'thruster':
+          this.clearThrusters();
+          break;
         case 'hose':
           break;
       }
@@ -219,8 +296,12 @@ export class Tools {
     }
   }
 
-  onMouseUp(button: number) {
+  onMouseUp(button: number, params: Params) {
     if (button === 0 && this.active === 'hose') this.stopHose();
+    if (button === 0 && this.active === 'physgun') {
+      const result = this.physgun.releaseCharge(params);
+      if (result === 'launched') this.kick = 1;
+    }
   }
 
   onWheel(deltaY: number) {
@@ -401,23 +482,17 @@ export class Tools {
     // clicking a rope with the rope tool severs it
     if (this.cutRopeAtAim()) return;
     const aim = this.aim();
-    if (!aim || aim.handle === undefined) {
-      this.ropePickA = null;
-      return;
-    }
-    const body = this.props.all.get(aim.handle) ?? this.props.boneByHandle.get(aim.handle);
-    if (!body) return;
-    const pos = 'pos' in body ? body.pos : new THREE.Vector3();
-    const quat = 'quat' in body ? (body as { quat: THREE.Quaternion }).quat : new THREE.Quaternion();
-    const local = aim.point.clone().sub(pos).applyQuaternion(quat.clone().invert());
+    // miss: keep any pending pick — turning to find the second prop shouldn't cancel
+    if (!aim || aim.handle === undefined) return;
+    const ref = this.bodyRef(aim.handle);
+    if (!ref) return;
+    const local = aim.point.clone().sub(ref.pos).applyQuaternion(this.tmpQ.copy(ref.quat).invert());
 
-    if (!this.ropePickA) {
+    if (!this.ropePickA || this.ropePickA.handle === aim.handle) {
+      // first pick, or re-pick a better anchor on the same prop
       this.ropePickA = { handle: aim.handle, local };
+      this.pickMarker.visible = true;
       sfx.rope();
-      return;
-    }
-    if (this.ropePickA.handle === aim.handle) {
-      this.ropePickA = null;
       return;
     }
 
@@ -426,6 +501,7 @@ export class Tools {
     const worldB = aim.point;
     if (!worldA) {
       this.ropePickA = null;
+      this.pickMarker.visible = false;
       return;
     }
     const joint = this.world.createDistanceJoint(
@@ -445,6 +521,7 @@ export class Tools {
     this.scene.add(line);
     this.ropes.push({ joint, a: a.handle, b: aim.handle, localA: a.local, localB: local, line });
     this.ropePickA = null;
+    this.pickMarker.visible = false;
     this.world.setBodyAwake(a.handle, true);
     this.world.setBodyAwake(aim.handle, true);
     sfx.rope();
@@ -452,11 +529,9 @@ export class Tools {
   }
 
   private anchorWorld(handle: number, local: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 | null {
-    const prop = this.props.all.get(handle);
-    if (prop) return out.copy(local).applyQuaternion(prop.quat).add(prop.pos);
-    const bone = this.props.boneByHandle.get(handle);
-    if (bone) return out.copy(local).applyQuaternion(bone.group.quaternion).add(bone.pos);
-    return null;
+    const ref = this.bodyRef(handle);
+    if (!ref) return null;
+    return out.copy(local).applyQuaternion(ref.quat).add(ref.pos);
   }
 
   clearRopes() {
@@ -468,6 +543,76 @@ export class Tools {
     if (this.ropes.length) sfx.del();
     this.ropes.length = 0;
     this.ropePickA = null;
+    this.pickMarker.visible = false;
+  }
+
+  // ── thrusters ─────────────────────────────────────────────────────────────
+
+  get thrusterCount() {
+    return this.thrusters.length;
+  }
+
+  private placeThruster() {
+    if (this.thrusters.length >= 24) return;
+    const aim = this.aim();
+    if (!aim || aim.handle === undefined || !aim.normal) return;
+    const ref = this.bodyRef(aim.handle);
+    if (!ref) return;
+    const invQ = this.tmpQ.copy(ref.quat).invert();
+    const local = aim.point.clone().sub(ref.pos).applyQuaternion(invQ);
+    const localDir = aim.normal.clone().applyQuaternion(invQ).normalize();
+
+    const mesh = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.26, 10), this.thrusterMat);
+    mesh.castShadow = true;
+    const flame = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.flameTex,
+        color: '#ffb36b',
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    flame.scale.setScalar(0.5);
+    this.scene.add(mesh, flame);
+    this.thrusters.push({ handle: aim.handle, local, localDir, mesh, flame });
+    this.world.setBodyAwake(aim.handle, true);
+    sfx.spawn();
+    this.kick = 0.45;
+  }
+
+  private removeThruster(t: Thruster) {
+    this.scene.remove(t.mesh, t.flame);
+    t.mesh.geometry.dispose();
+    (t.flame.material as THREE.Material).dispose();
+  }
+
+  clearThrusters() {
+    if (this.thrusters.length) sfx.del();
+    for (const t of this.thrusters) this.removeThruster(t);
+    this.thrusters.length = 0;
+  }
+
+  /**
+   * Thrusters burn once per fixed physics step (impulse at point, so torque
+   * comes free and step count never double-applies).
+   */
+  prePhysics(step: number, params: Params) {
+    for (let i = this.thrusters.length - 1; i >= 0; i--) {
+      const t = this.thrusters[i];
+      const ref = this.bodyRef(t.handle);
+      if (!ref) {
+        this.removeThruster(t);
+        this.thrusters.splice(i, 1);
+        continue;
+      }
+      const dir = this.tmpV.copy(t.localDir).applyQuaternion(ref.quat);
+      const point = this.tmpV2.copy(t.local).applyQuaternion(ref.quat).add(ref.pos);
+      const mag = ref.mass * params.thruster.power * step;
+      // exhaust points along `dir`; thrust pushes the body the other way
+      this.world.applyImpulseAtPoint(t.handle, [-dir.x * mag, -dir.y * mag, -dir.z * mag], [point.x, point.y, point.z]);
+      this.world.setBodyAwake(t.handle, true);
+    }
   }
 
   /** Drop rope joints whose bodies were deleted (X / delete tool). */
@@ -518,7 +663,33 @@ export class Tools {
         attr.setXYZ(i, x, y, z);
       }
       attr.needsUpdate = true;
+      // keep raycast culling in sync with the moving rope, or cutting breaks
+      rope.line.geometry.computeBoundingSphere();
     }
+
+    // rope pick marker rides its anchor
+    if (this.ropePickA) {
+      if (this.anchorWorld(this.ropePickA.handle, this.ropePickA.local, pa)) {
+        this.pickMarker.position.copy(pa);
+        this.pickMarker.scale.setScalar(0.45 + Math.sin(performance.now() * 0.008) * 0.1);
+      } else {
+        this.ropePickA = null;
+        this.pickMarker.visible = false;
+      }
+    }
+
+    // thruster visuals: nozzle on the surface, flickering flame at the tip
+    for (const t of this.thrusters) {
+      const ref = this.bodyRef(t.handle);
+      if (!ref) continue;
+      const dir = this.tmpV.copy(t.localDir).applyQuaternion(ref.quat);
+      const point = this.tmpV2.copy(t.local).applyQuaternion(ref.quat).add(ref.pos);
+      t.mesh.position.copy(point).addScaledVector(dir, 0.1);
+      t.mesh.quaternion.setFromUnitVectors(this.upAxis, dir);
+      t.flame.position.copy(point).addScaledVector(dir, 0.32 + Math.random() * 0.08);
+      t.flame.scale.setScalar(0.38 + Math.random() * 0.22);
+    }
+    sfx.thrustLoop(this.thrusters.length);
 
     // booms
     for (let i = this.booms.length - 1; i >= 0; i--) {

@@ -2,10 +2,14 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ericsmod",
+      "name": "fables-mod",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 5183
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 5183,
+      "autoPort": true
     }
   ]
 }

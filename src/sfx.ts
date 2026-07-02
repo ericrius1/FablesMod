@@ -5,6 +5,7 @@ let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
 let sprayNode: { gain: GainNode; stop: () => void } | null = null;
 let humNode: { gain: GainNode; oscA: OscillatorNode; oscB: OscillatorNode } | null = null;
+let thrustNode: { gain: GainNode; src: AudioBufferSourceNode; sub: OscillatorNode } | null = null;
 let volume = 0.22;
 
 function ac(): AudioContext | null {
@@ -183,5 +184,41 @@ export const sfx = {
     humNode.oscA.stop(a.currentTime + 0.9);
     humNode.oscB.stop(a.currentTime + 0.9);
     humNode = null;
+  },
+  /** Shared rumble for all active thrusters; call every frame with the count. */
+  thrustLoop(count: number) {
+    const a = ac();
+    if (!a || !master) return;
+    if (count > 0 && !thrustNode) {
+      const src = a.createBufferSource();
+      src.buffer = noiseBuffer(a, 1);
+      src.loop = true;
+      const filter = a.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 240;
+      const sub = a.createOscillator();
+      sub.type = 'sine';
+      sub.frequency.value = 52;
+      const subGain = a.createGain();
+      subGain.gain.value = 0.5;
+      const g = a.createGain();
+      g.gain.value = 0;
+      src.connect(filter).connect(g);
+      sub.connect(subGain).connect(g);
+      g.connect(master);
+      src.start();
+      sub.start();
+      thrustNode = { gain: g, src, sub };
+    }
+    if (thrustNode) {
+      const target = count > 0 ? Math.min(0.18, 0.06 + count * 0.015) : 0;
+      thrustNode.gain.gain.setTargetAtTime(target, a.currentTime, 0.1);
+      if (count === 0) {
+        const node = thrustNode;
+        thrustNode = null;
+        node.src.stop(a.currentTime + 0.5);
+        node.sub.stop(a.currentTime + 0.5);
+      }
+    }
   },
 };

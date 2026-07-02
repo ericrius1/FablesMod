@@ -9,6 +9,7 @@ export class Hud {
   private overlay = document.getElementById('lock-overlay')!;
   private slots = new Map<ToolId, HTMLElement>();
   private helpTimer = 0;
+  private started = false;
 
   constructor() {
     for (let i = 0; i < TOOL_DEFS.length; i++) {
@@ -32,7 +33,8 @@ export class Hud {
   }
 
   setLocked(locked: boolean) {
-    this.overlay.classList.toggle('hidden', locked);
+    if (locked) this.started = true;
+    this.overlay.classList.toggle('hidden', locked || this.started);
   }
 
   setActiveTool(id: ToolId, hint: string) {

@@ -11,11 +11,12 @@ import { Hud } from './hud';
 import { initAudio, setVolume, sfx } from './sfx';
 
 const TOOL_HINTS: Record<ToolId, string> = {
-  physgun: 'LMB grab / drop · RMB launch · scroll distance · R spin · C cut rope',
+  physgun: 'LMB grab · tap drop / hold to charge launch · RMB launch · scroll distance · R spin · C cut rope',
   spawner: 'LMB spawn · RMB delete · scroll item',
   hose: 'hold LMB to spray',
   boom: 'LMB boom · RMB mega boom',
   rope: 'LMB link two props · LMB a rope (or C) cuts it · RMB clear all',
+  thruster: 'LMB strap a rocket to a prop · RMB clear thrusters',
 };
 
 async function boot() {
@@ -56,15 +57,23 @@ async function boot() {
   // ── pointer lock + input ──────────────────────────────────────────────────
   const canvas = renderer.domElement;
   let locked = false;
+  // pointer lock can be unavailable (embedded previews, permissions policy);
+  // fall back to playing with a visible cursor — movementX/Y still works
+  let lockFallback = false;
   const requestLock = () => {
     initAudio();
-    canvas.requestPointerLock();
+    const req = canvas.requestPointerLock() as Promise<void> | undefined;
+    req?.catch(() => {
+      lockFallback = true;
+      locked = true;
+      hud.setLocked(true);
+    });
   };
   hud.bindPlay(requestLock);
   document.addEventListener('pointerlockchange', () => {
-    locked = document.pointerLockElement === canvas;
+    locked = document.pointerLockElement === canvas || lockFallback;
     hud.setLocked(locked);
-    if (!locked) tools.onMouseUp(0);
+    if (!locked) tools.onMouseUp(0, params);
   });
   document.addEventListener('mousemove', (e) => {
     if (locked) player.onMouseDelta(e.movementX, e.movementY);
@@ -73,7 +82,7 @@ async function boot() {
     if (locked) tools.onMouseDown(e.button, params);
   });
   addEventListener('mouseup', (e) => {
-    if (locked) tools.onMouseUp(e.button);
+    if (locked) tools.onMouseUp(e.button, params);
   });
   addEventListener('contextmenu', (e) => e.preventDefault());
   addEventListener(
@@ -89,7 +98,7 @@ async function boot() {
   addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    const idx = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(e.code);
+    const idx = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].indexOf(e.code);
     if (idx >= 0) {
       tools.setTool(TOOL_DEFS[idx].id);
       return;
@@ -109,6 +118,7 @@ async function boot() {
       case 'KeyX':
         tools.physgun.forceRelease();
         tools.clearRopes();
+        tools.clearThrusters();
         props.clearAll();
         sfx.del();
         break;
@@ -159,12 +169,29 @@ async function boot() {
       locked = on;
     },
     ropes: () => tools.ropeCount,
+    thrusters: () => tools.thrusterCount,
     grabAim: () => {
       const ok = tools.physgun.tryGrab();
       return { grabbed: ok, holding: tools.physgun.holding };
     },
     dropHeld: () => tools.physgun.drop(),
+    physState: () => ({
+      holding: tools.physgun.holding,
+      charging: tools.physgun.charging,
+      charge: tools.physgun.charge,
+      holdDist: tools.physgun.holdDist,
+      heldPos: tools.physgun.held
+        ? (tools.physgun.held.kind === 'prop'
+            ? tools.physgun.held.prop!.pos.toArray()
+            : tools.physgun.held.bone!.pos.toArray()
+          ).map((v) => Math.round(v * 100) / 100)
+        : null,
+    }),
     launchHeld: () => tools.physgun.launch(params),
+    lastProps: (n = 3) => {
+      const arr = [...props.all.values()].slice(-n);
+      return arr.map((p) => ({ shape: p.shape, pos: p.pos.toArray().map((v) => Math.round(v * 100) / 100) }));
+    },
     propYs: () => {
       const ys: Record<string, number[]> = {};
       for (const prop of props.all.values()) {
@@ -203,6 +230,7 @@ async function boot() {
     let steps = 0;
     while (accumulator >= FIXED_STEP && steps < 4) {
       fluid.prePhysics(FIXED_STEP, params);
+      tools.prePhysics(FIXED_STEP, params);
       world.step(FIXED_STEP, SUBSTEPS);
       accumulator -= FIXED_STEP;
       steps++;
@@ -239,6 +267,7 @@ async function boot() {
         slowMo ? 'SLOW-MO' : '',
         player.inWater ? 'SWIMMING' : '',
         tools.ropeCount ? `${tools.ropeCount} ropes` : '',
+        tools.thrusterCount ? `${tools.thrusterCount} thrusters` : '',
       ]
         .filter(Boolean)
         .join(' · ');
