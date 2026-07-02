@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Eric's Mod — a first-person physics sandbox powered by Box3D." />
+    <title>Eric's Mod</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">
+      <div id="crosshair"></div>
+      <div id="tool-hint"></div>
+      <div id="toolbar"></div>
+      <div id="help-card">
+        <h1>ERIC'S MOD</h1>
+        <table>
+          <tr><td>WASD / Shift / Space</td><td>move / sprint / jump</td></tr>
+          <tr><td>1–5</td><td>tools: physgun · spawner · hose · boom · rope</td></tr>
+          <tr><td>LMB / RMB</td><td>use tool / alt use</td></tr>
+          <tr><td>Scroll</td><td>physgun distance · spawner item</td></tr>
+          <tr><td>R</td><td>spin held prop</td></tr>
+          <tr><td>C</td><td>cut rope (aimed, or on held prop)</td></tr>
+          <tr><td>G / F / X</td><td>zero-g props / slow-mo / clear</td></tr>
+          <tr><td>/ · h</td><td>debug pane · this help</td></tr>
+        </table>
+      </div>
+      <div id="status-line"></div>
+    </div>
+    <div id="lock-overlay">
+      <div class="panel">
+        <h1>ERIC'S MOD</h1>
+        <p>a physics playground</p>
+        <button id="play-btn">CLICK TO PLAY</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
